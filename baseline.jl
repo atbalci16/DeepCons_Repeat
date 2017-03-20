@@ -87,7 +87,8 @@ function main()
 	xtst, ytst = preprocess(tst)
 	w = weights([4000 2])
 	dtrn = minibatch(xtrn,ytrn,100)
-	print("$(accuracy(w, dtrn))\n")
+    dtst = minibatch(xtst,ytst,100)
+	print("training accuracy: $(accuracy(w, dtrn)), test accuracy: $(accuracy(w, dtst))\n")
 
 end
 
