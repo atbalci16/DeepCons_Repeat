@@ -67,6 +67,16 @@ function predict(w,x)
     return pred
 end
 
+function loss(w,x,ygold)
+    pred_y = predict(w,x)
+    lost = -sum(ygold .*pred_y) / size(x, 2)
+    return lost
+end
+
+function avg_loss(w,data)
+    return sum([loss(w,x,y) for (x,y) in data])/length(data)
+end
+
 function accuracy(w, data)
     ncorrect = 0
     ninstance = 0
@@ -88,7 +98,8 @@ function main()
 	w = weights([4000 2])
 	dtrn = minibatch(xtrn,ytrn,100)
     dtst = minibatch(xtst,ytst,100)
-	print("training accuracy: $(accuracy(w, dtrn)), test accuracy: $(accuracy(w, dtst))\n")
+	print("training accuracy        : $(accuracy(w, dtrn))\ntesting accuracy         : $(accuracy(w, dtst))\n")
+    print("average loss for training: $(avg_loss(w,dtrn))\naverage loss for testing : $(avg_loss(w,dtst))\n")
 
 end
 
