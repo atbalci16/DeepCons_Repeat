@@ -44,10 +44,10 @@ function read_data()
 end
 
 function getChunk(data, sz, i)
-  if i+sz-1 > length(data)
-    return map(x->split(x), data[i:length(data)])
+  if ((i-1)*sz+sz) > length(data)
+    return map(x->split(x), data[((i-1)*sz+1):length(data)])
   else
-    return map(x->split(x), data[i:(i+sz-1)])
+    return map(x->split(x), data[((i-1)*sz+1):((i-1)*sz+sz)])
   end
 end
 
