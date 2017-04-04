@@ -2,41 +2,57 @@
 #     Pkg.installed(p) == nothing && Pkg.add(p)
 # end
 
-using Knet, HDF5
+using Knet, JLD
 
-function dataToh5(sz,data)
-  ifile = open(data, "r")
-  ofile = h5open(string(data[1:end-4],".h5"), "w")
-  train = readlines(ifile)
-  train = map(line -> split(line), train)
-  x = convert(Array{String},[elm[1] for elm in train])
-  y = convert(Array{String},[elm[2] for elm in train])
+function writeData(itxt,otxt,n)
+  ofile = open(otxt, "w")
   index = 1
-  for i=1:sz:length(x)
-    g = g_create(ofile,dec(index))
-    if i+sz-1 > length(x)
-      g["x"] = x[i:end]
-      g["y"] = y[i:end]
-    else
-      g["x"] = x[i:i+sz-1]
-      g["y"] = y[i:i+sz-1]
+  open(itxt, "r") do file
+    for line in readlines(file)
+      if length(line)-2 < 200
+        write(ofile,line)
+        index += 1
+      end
+      if index > n
+        break
+      end
     end
-    index += 1
   end
-  close(ifile)
   close(ofile)
 end
 
 function prepData()
-  isfile("data_train.h5") || dataToh5(19200,"data_train.seq")
-  isfile("data_test.h5") || dataToh5(19200,"data_test.seq")
-  isfile("data_valid.h5") || dataToh5(19200,"data_valid.seq")
+  isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
+  isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
+  isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
+  writeData("data_tr.seq","data_train.seq",600000)
+  writeData("data_te.seq","data_test.seq",150000)
+  writeData("data_va.seq","data_valid.seq",150000)
 end
 
-function read_data(file,index)
-  f = h5open(file)
-  data = read(f)[dec(index)]
-  return data["x"], data["y"]
+function read_data()
+  dtrn = open("data_train.seq") do f
+    readlines(f)
+  end
+  dtst = open("data_test.seq") do f
+    readlines(f)
+  end
+  dva = open("data_valid.seq") do f
+    readlines(f)
+  end
+  return dtrn, dtst, dva
+end
+
+function getChunk(data, sz, i)
+  if i+sz-1 > length(data)
+    return map(x->split(x), data[i:length(data)])
+  else
+    return map(x->split(x), data[i:(i+sz-1)])
+  end
+end
+
+function getIter(ltr,lts,lva,sz)
+  return convert(Int32,ceil(ltr/sz)), convert(Int32,ceil(lva/sz)), convert(Int32,ceil(lts/sz))
 end
 
 function seqMap(na)
@@ -51,7 +67,9 @@ function seqToVector!(matrix, seq, index)
   matrix[index_m] = 1
 end
 
-function preprocess(xdata,ydata)
+function preprocess(data)
+  xdata = [elm[1] for elm in data]
+  ydata = [elm[2] for elm in data]
   preprocessed = zeros(UInt8,4,200,1,length(xdata))
   y_out = zeros(UInt8,2, length(ydata))
   map( x -> seqToVector!(preprocessed, x[2], x[1]),enumerate(xdata))
@@ -82,7 +100,7 @@ function weights(;winit=0.1)
                convert(KnetArray{Float32},zeros(2,1))]
 end
 
-function initparams(weights;learning_rate=0.001)
+function initparams(weights;learning_rate=0.005)
   return map(x -> Adam(;lr=learning_rate), weights)
 end
 
@@ -110,9 +128,10 @@ lossgradient =  grad(loss)
 function train(w,dtrn,params)
     for (x,y) in dtrn
         w_grad = lossgradient(w, x, y)
-        map(x -> update!(x[1],x[2],x[3]), zip(w, w_grad, params))
+        for i=1:length(w)
+          update!(w[i],w_grad[i],params[i])
+        end
     end
-    #print("Free gpu memory $(Knet.gpufree())\n")
     return w
 end
 
@@ -122,59 +141,86 @@ function avgloss(w,data)
         sum += loss(w,x,y)
         cnt += 1
     end
-    return sum/cnt
+    return sum, cnt
+end
+
+function accuracy(w,dtst,pred=predict)
+    ncorrect = 0
+    ninstance = 0
+    nloss = 0
+    for (x,y) in dtst
+        pred_y = pred(w,x)
+        pred_y = pred_y .== maximum(pred_y,1)
+        ncorrect += sum(pred_y .* y)
+        ninstance += size(pred_y,2)
+    end
+    nloss = ninstance - ncorrect
+    return (ncorrect, nloss,ninstance)
 end
 
 function main()
-  print("free gpu memory $(Knet.gpufree())\n")
   prepData()
+  chunk_size = 12800
   w = weights()
   params = initparams(w)
+  dtrain,dtest,dvalid = read_data()
+  itrain, ival, itest = getIter(length(dtrain),length(dtest),length(dvalid),chunk_size)
+  patience = 0
+  bests = 0
+  bestw = Any[]
+  corr=0;wrong=0;instance = 0
   @time for epoch=1:100
-    average_loss = 0
-    for i=1:68
-      print("loading data #$i...\n")
-      @time x, y = read_data("data_train.h5",i)
-      @time xtrn, ytrn = preprocess(x,y)
-      @time dtrn = minibatch(xtrn,ytrn,128)
-      @time train(w,dtrn,params)
-      @time average_loss += avgloss(w,dtrn)
-      xtrn = 0
-      ytrn = 0
-      x = 0
-      y = 0
-      dtrn = 0
-      @time gc()
+    if patience > 10
+      print("Early stopping no progess for 10 epoch... \n")
+      break
     end
-    print("$epoch; average lost is $(average_loss/51) \n")
+    print("epoch $epoch... \n")
     average_loss = 0
-    for i=1:9
-      @time x, y = read_data("data_valid.h5",i)
-      @time xtrn, ytrn = preprocess(x,y)
-      @time dtrn = minibatch(xtrn,ytrn,128)
-      @time average_loss += avgloss(w,dtrn)
-      xtrn = 0
-      ytrn = 0
-      x = 0
-      y = 0
-      dtrn = 0
-      @time gc()
+    for i=1:itrain
+      data = getChunk(dtrain, chunk_size, i)
+      xtrn, ytrn = preprocess(data)
+      dtrn = minibatch(xtrn,ytrn,128)
+      train(w,dtrn,params)
+      ncorr, nwrong, ninstance = accuracy(w,dtrn)
+      corr += ncorr; wrong += nwrong; instance += ninstance
+      xtrn = 0;ytrn = 0;data = 0;dtrn = 0;
+      gc()
     end
-    print("$epoch; validation lost is $(average_loss/9) \n")
+    print("$epoch: Training accuracy is $(corr/instance) $(wrong/instance) \n")
+    nloss = 0;ninstance = 0
+    tloss = 0;tinstance = 0
+    for i=1:ival
+      data = getChunk(dvalid, chunk_size, i)
+      xva, yva = preprocess(data)
+      dva = minibatch(xva,yva,128)
+      nloss, ninstance= avgloss(w,dva)
+      tloss += nloss; tinstance += ninstance
+      xva = 0;yva = 0;data = 0;dva = 0;
+      gc()
+    end
+    average_loss = tloss/tinstance
+    print("$epoch: validation lost is $(average_loss) \n")
+    if average_loss < bests
+      bestw = w
+      bests = average_loss
+      patience = 0
+    else
+      patience += 1
+    end
   end
-  for i=1:9
-    @time x, y = read_data("data_test.h5",i)
-    @time xtrn, ytrn = preprocess(x,y)
-    @time dtrn = minibatch(xtrn,ytrn,128)
-    @time average_loss += avgloss(w,dtrn)
-    xtrn = 0
-    ytrn = 0
-    x = 0
-    y = 0
-    dtrn = 0
-    @time gc()
+  corr=0;wrong=0;instance = 0
+  for i=1:itest
+    data = getChunk(dtest, chunk_size, i)
+    xtst, ytst = preprocess(data)
+    dtst = minibatch(xtst,ytst,128)
+    ncorr, nwrong, ninstance = accuracy(bestw,dtst)
+    corr += ncorr; wrong += nwrong; instance += ninstance
+    xtst = 0;ytst = 0;data = 0;dtst = 0;
+    gc()
   end
-  print("$epoch; test lost is $(average_loss/9) \n")
+  print("Test accuracy is $(corr/instance) $(wrong/instance) \n")
+  print("Writing the weights of the best model to weights.jld \n")
+  save("weights.jld","w",map(x->convert(Array{Float32},x),bestw))
 end
 
 main()
