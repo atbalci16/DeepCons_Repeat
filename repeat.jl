@@ -168,7 +168,6 @@ function main()
   patience = 0
   bests = 0
   bestw = Any[]
-  corr=0;wrong=0;instance = 0
   @time for epoch=1:100
     if patience > 10
       print("Early stopping no progess for 10 epoch... \n")
@@ -176,17 +175,13 @@ function main()
     end
     print("epoch $epoch... \n")
     average_loss = 0
-    for i=1:itrain
+    @time for i=1:itrain
       data = getChunk(dtrain, chunk_size, i)
       xtrn, ytrn = preprocess(data)
       dtrn = minibatch(xtrn,ytrn,128)
       train(w,dtrn,params)
-      ncorr, nwrong, ninstance = accuracy(w,dtrn)
-      corr += ncorr; wrong += nwrong; instance += ninstance
-      xtrn = 0;ytrn = 0;data = 0;dtrn = 0;
       gc()
     end
-    print("$epoch: Training accuracy is $(corr/instance) $(wrong/instance) \n")
     nloss = 0;ninstance = 0
     tloss = 0;tinstance = 0
     for i=1:ival
