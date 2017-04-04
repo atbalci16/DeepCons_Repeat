@@ -92,11 +92,11 @@ function minibatch(x,y,sz)
 end
 
 function weights(;winit=0.1)
-    return Any[convert(KnetArray{Float32},randn(4,10,1,500)*winit), 
+    return Any[convert(KnetArray{Float32},randn(4,10,1,1000)*winit), 
+               convert(KnetArray{Float32},zeros(1,1,1000,1)),
+               convert(KnetArray{Float32},randn(4,20,1,500)*winit), 
                convert(KnetArray{Float32},zeros(1,1,500,1)),
-               convert(KnetArray{Float32},randn(4,20,1,250)*winit), 
-               convert(KnetArray{Float32},zeros(1,1,250,1)),
-               convert(KnetArray{Float32},randn(2,750)*winit),
+               convert(KnetArray{Float32},randn(2,1500)*winit),
                convert(KnetArray{Float32},zeros(2,1))]
 end
 
