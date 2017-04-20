@@ -36,9 +36,9 @@ function prepData()
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",1000000) #1290000
-  writeData("data_te.seq","data_test.seq",150000) #165000
-  writeData("data_va.seq","data_valid.seq",150000) #165000
+  writeData("data_tr.seq","data_train.seq",10000) #1290000
+  writeData("data_te.seq","data_test.seq",1500) #165000
+  writeData("data_va.seq","data_valid.seq",1500) #165000
 end
 
 function read_data()
@@ -112,21 +112,18 @@ function minibatch(x,y,sz)
 end
 
 function weights(;w=[],winit=0.1)
-    if length(w) == 6
-      return Any[convert(KnetArray{Float32},w[1]), 
-                 convert(KnetArray{Float32},w[2]),
-                 convert(KnetArray{Float32},w[3]), 
-                 convert(KnetArray{Float32},w[4]),
-                 convert(KnetArray{Float32},w[5]),
-                 convert(KnetArray{Float32},w[6])]
+    if length(w) == 8
+      return map(x->convert(KnetArray{Float32},x),w)
     else
-      return Any[convert(KnetArray{Float32},randn(4,10,1,1000)*winit), 
-                 convert(KnetArray{Float32},zeros(1,1,1000,1)),
-                 convert(KnetArray{Float32},randn(4,20,1,500)*winit), 
-                 convert(KnetArray{Float32},zeros(1,1,500,1)),
-                 convert(KnetArray{Float32},randn(2,1500)*winit),
-                 convert(KnetArray{Float32},zeros(2,1))]
-    end
+      return Any[randn(4,10,1,1000)*winit, 
+                 zeros(1,1,1000,1),
+                 randn(4,20,1,500)*winit, 
+                 zeros(1,1,500,1),
+                 randn(1500,1500),
+                 zeros(1500,1),
+                 randn(2,1500)*winit,
+                 zeros(2,1)]
+    end    
 end
 
 function initparams(weights;learningRate=0.005)
@@ -139,7 +136,8 @@ function predict(w,x)
     pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
     pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
     pool_out = [pool_1 ; pool_2]
-    y = dropout(w[5]*pool_out .+ w[6], 0.5)
+    y = dropout(relu(w[5]*pool_out .+ w[6]), 0.5)
+    y = w[7] * y .+ w[8]
     return y
 end
 
@@ -149,7 +147,8 @@ function pred(w,x)
     pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
     pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
     pool_out = [pool_1 ; pool_2]
-    y = w[5]*pool_out .+ w[6]
+    y = relu(w[5]*pool_out .+ w[6])
+    y = w[7] * y .+ w[8]
     y = y .- maximum(y,1)
     expsum = sum(exp(y),1)
     pred = exp(y)./expsum
