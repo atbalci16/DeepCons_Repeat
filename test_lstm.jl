@@ -33,9 +33,9 @@ function prepData()
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",5) #1290000
-  writeData("data_te.seq","data_test.seq",1) #165000
-  writeData("data_va.seq","data_valid.seq",1) #165000
+  writeData("data_tr.seq","data_train.seq",1024) #1290000
+  writeData("data_te.seq","data_test.seq",128) #165000
+  writeData("data_va.seq","data_valid.seq",280) #165000
 end
 
 function read_data()
@@ -83,21 +83,21 @@ function preprocess(data)
 end
 
 function weights(lstate;w=[],winit=0.1)
-  weights = Dict{AbstractString,KnetArray{Float32}}()
-  weights["wforget"]    = convert(KnetArray{Float32}, randn(lstate+200,lstate))
-  weights["bforget"]    = convert(KnetArray{Float32}, zeros(1,lstate))
-  weights["winput"]     = convert(KnetArray{Float32}, randn(lstate+200,lstate))
-  weights["binput"]     = convert(KnetArray{Float32}, zeros(1,lstate))
-  weights["wcandidate"] = convert(KnetArray{Float32}, randn(lstate+200,lstate))
-  weights["bcandidate"] = convert(KnetArray{Float32}, zeros(1,lstate))
-  weights["woutput"]    = convert(KnetArray{Float32}, randn(lstate+200,lstate))
-  weights["boutput"]    = convert(KnetArray{Float32}, zeros(1,lstate))
-  weights["who"]        = convert(KnetArray{Float32}, randn(lstate,2))
-  weights["bho"]        = convert(KnetArray{Float32}, zeros(1,2))
+  weights = Any[convert(KnetArray{Float32}, randn(lstate+4,lstate))
+                convert(KnetArray{Float32}, zeros(1,lstate))
+                convert(KnetArray{Float32}, randn(lstate+4,lstate))
+                convert(KnetArray{Float32}, zeros(1,lstate))
+                convert(KnetArray{Float32}, randn(lstate+4,lstate))
+                convert(KnetArray{Float32}, zeros(1,lstate))
+                convert(KnetArray{Float32}, randn(lstate+4,lstate))
+                convert(KnetArray{Float32}, zeros(1,lstate))
+                convert(KnetArray{Float32}, randn(lstate,2))
+                convert(KnetArray{Float32}, zeros(1,2))]
+  return weights
 end
 
 function initparams(weights;learningRate=0.005)
-  return map(x -> Adagrad(;lr=learningRate), weights)
+  return map(x -> Adam(;lr=learningRate), weights)
 end
 
 function initstate(lstate,sz)
@@ -113,21 +113,21 @@ function minibatch(x,y,sz)
   for j=1:nbatch
     batch = Any[]
     minix = x[((j-1)*sz+1):sz*j]
-    for i=1:200
-      push!(batch, generateStep([vocab(elm[i]) for elm in minix]))
+    for i=1:20
+      push!(batch, convert(KnetArray{Float32}, generateStep([vocab(elm[i]) for elm in minix])))
     end
-      push!(data,(batch,y[((j-1)*sz+1):sz*j,:]))
+      push!(data,(batch, convert(KnetArray{Float32},y[((j-1)*sz+1):sz*j,:])))
   end
   return data
 end
 
 function lstm(cell,x,hidden,W)
   input = [x hidden]
-  fgate = sigm(input * W["wforget"] + W["bforget"])
-  igate = sigm(input * W["winput"] + W["binput"])
-  candidate = tanh(input * W["wcandidate"]+ W["bcandidate"])
-  cell = fgate .* former + igate .* candidate
-  ogate = sigm(input * W["woutput"] + W["boutput"])
+  fgate = sigm(input * W[1] .+ W[2])
+  igate = sigm(input * W[3] .+ W[4])
+  candidate = tanh(input * W[5] .+ W[6])
+  cell = fgate .* cell + igate .* candidate
+  ogate = sigm(input * W[7] .+ W[8])
   hidden = ogate .* tanh(cell)
   return (cell,hidden)
 end
@@ -136,16 +136,29 @@ function predict(w,x,cell,hidden)
   for input in x
     cell, hidden = lstm(cell,input,hidden,w)
   end
-  y = hidden * W["who"] .+ W["bho"]
+
+  y = hidden * w[9] .+ w[10]
   return y
 end
 
+function pred(w,x,cell,hidden)
+  for input in x
+    cell, hidden = lstm(cell,input,hidden,w)
+  end
+  y = hidden * w[9] .+ w[10]
+  y = y .- maximum(y,2)
+  expsum = sum(exp(y),2)
+  pred = exp(y)./expsum
+  return pred
+end
+
 function loss(w,x,ygold,cell,hidden)
-  y = predict(w,x,cell,hidden)
-  y = y .- maximum(y,1)
-  expy = exp(y)
-  logphat = y .- log(sum(expy,1))
-  lost = -sum(ygold .* logphat) / size(x, 4)
+  ypred = predict(w,x,cell,hidden)
+  ypred = ypred .- maximum(ypred,2)
+  expy = exp(ypred)
+  ynorm = logp(ypred,2)
+  lost = -sum(ygold .* ynorm) / size(ygold, 1)
+  println("sum")
   return lost
 end
 
@@ -201,7 +214,7 @@ function main()
   itrain, ival, itest = getIter(length(dtrain),length(dtest),length(dvalid),chunk_size)
   patience = 0
   bests = Inf
-  bestw = Any[]
+  bestw =Any[]
   validLost = Any[]
   @time for epoch=1:opts[:epochs]
     if patience > 10
@@ -252,4 +265,4 @@ function main()
   return bestw
 end
 
-main()
+w = main()
