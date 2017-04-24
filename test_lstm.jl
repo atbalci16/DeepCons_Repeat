@@ -1,4 +1,4 @@
-using Knet, JLD, ArgParse
+using JLD,ArgParse,Knet
 
 function parse_commandline()
     s = ArgParseSettings()
@@ -7,7 +7,11 @@ function parse_commandline()
         ("--batchsize"; arg_type=Int; default=128; help="Number of sequences to train on in parallel.")
         ("--lr"; arg_type=Float64; default=0.005; help="Initial learning rate.")
         ("--weight"; arg_type=String; default=""; help="Initial weights instead of randomly initialized ones.")
-        ("--state"; arg_type=Int; default=150; help="Length of cell and hidden vector.")
+        ("--state"; arg_type=Int; default=30; help="Length of cell and hidden vector.")
+        ("--chunksize"; arg_type=Int; default=12800; help="Chunk size.")
+        ("--ltrain"; arg_type=Int; default=1024; help="Training size.")
+        ("--ltest"; arg_type=Int; default=128; help="Test size.")
+        ("--lval"; arg_type=Int; default=128; help="Validation size.")
     end
     return parse_args(s;as_symbols = true)        
 end
@@ -17,7 +21,7 @@ function writeData(itxt,otxt,n)
   index = 1
   open(itxt, "r") do file
     for line in readlines(file)
-      if length(line)-2 < 200
+      if length(line)-3 == 30
         write(ofile,line)
         index += 1
       end
@@ -29,13 +33,13 @@ function writeData(itxt,otxt,n)
   close(ofile)
 end
 
-function prepData()
+function prepData(trsz,tssz,vasz)
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",1024) #1290000
-  writeData("data_te.seq","data_test.seq",128) #165000
-  writeData("data_va.seq","data_valid.seq",280) #165000
+  writeData("data_tr.seq","data_train.seq",trsz) #1290000
+  writeData("data_te.seq","data_test.seq",tssz) #165000
+  writeData("data_va.seq","data_valid.seq",vasz) #165000
 end
 
 function read_data()
@@ -53,9 +57,9 @@ end
 
 function getChunk(data, sz, i)
   if ((i-1)*sz+sz) > length(data)
-    return map(x->split(x), data[((i-1)*sz+1):length(data)])
+    return data[((i-1)*sz+1):length(data)]
   else
-    return map(x->split(x), data[((i-1)*sz+1):((i-1)*sz+sz)])
+    return data[((i-1)*sz+1):((i-1)*sz+sz)]
   end
 end
 
@@ -73,26 +77,50 @@ function generateStep(x)
 end
 
 function preprocess(data)
+  data = map(x->split(x), data)
   xdata = [elm[1] for elm in data]
   ydata = [elm[2] for elm in data]
   y_prep = zeros(Bool,length(ydata),2)
   y = [parse(elm)+1 for elm in ydata]
-  index = map(x -> sub2ind((2,length(y)),x[1],x[2]),enumerate(y))
-  y_prep[index] = 1
+  index = map(x -> sub2ind((length(ydata),2),x[1],x[2]),enumerate(y))
+  y_prep[index] = true
   return xdata, y_prep
 end
 
-function weights(lstate;w=[],winit=0.1)
-  weights = Any[convert(KnetArray{Float32}, randn(lstate+4,lstate))
-                convert(KnetArray{Float32}, zeros(1,lstate))
-                convert(KnetArray{Float32}, randn(lstate+4,lstate))
-                convert(KnetArray{Float32}, zeros(1,lstate))
-                convert(KnetArray{Float32}, randn(lstate+4,lstate))
-                convert(KnetArray{Float32}, zeros(1,lstate))
-                convert(KnetArray{Float32}, randn(lstate+4,lstate))
-                convert(KnetArray{Float32}, zeros(1,lstate))
-                convert(KnetArray{Float32}, randn(lstate,2))
-                convert(KnetArray{Float32}, zeros(1,2))]
+function minibatch(x,y,sz;atype=KnetArray{Float32})
+  nbatch = div(length(x), sz)
+  padding = maximum(map(a -> length(a), x))
+  x = [lpad(elm,padding,'N') for elm in x]
+  data = Any[]
+  for j=1:nbatch
+    batch = Any[]
+    minix = x[((j-1)*sz+1):sz*j]
+    for i=1:padding
+      push!(batch, convert(atype, generateStep([vocab(elm[i]) for elm in minix])))
+    end
+    push!(data,(batch, convert(atype,y[((j-1)*sz+1):sz*j,:])))
+  end
+  return data
+end
+
+function lstm(cell,x,hidden,W)
+  input = hcat(x, hidden)
+  result = input * W[1] .+ W[2]
+  sz = size(hidden,2)
+  fgate = sigm(result[:,1:sz])
+  igate = sigm(result[:,sz+1:2*sz])
+  candidate = tanh(result[:,2*sz+1:3*sz])
+  cell = fgate .* cell + igate .* candidate
+  ogate = sigm(result[:,3*sz+1:end])
+  hidden = ogate .* tanh(cell)
+  return (cell,hidden)
+end
+
+function weights(lstate,vocabsz,outsz;atype=KnetArray{Float32})
+  weights = Any[convert(atype,xavier((vocabsz+lstate), 4*lstate)),
+                convert(atype, zeros(1,4*lstate)),
+                convert(atype,xavier(lstate,outsz)),
+                convert(atype, zeros(1,outsz))]
   return weights
 end
 
@@ -100,65 +128,36 @@ function initparams(weights;learningRate=0.005)
   return map(x -> Adam(;lr=learningRate), weights)
 end
 
-function initstate(lstate,sz)
-    cell = convert(KnetArray{Float32}, zeros(sz,lstate))
-    hidden = convert(KnetArray{Float32}, zeros(sz,lstate))
+function initstate(lstate,batchsz)
+    cell = convert(KnetArray{Float32}, zeros(batchsz,lstate))
+    hidden = convert(KnetArray{Float32}, zeros(batchsz,lstate))
     return cell, hidden
-end
-
-function minibatch(x,y,sz)
-  nbatch = div(length(x), sz)
-  x = [lpad(elm,200,'N') for elm in x]
-  data = Any[]
-  for j=1:nbatch
-    batch = Any[]
-    minix = x[((j-1)*sz+1):sz*j]
-    for i=1:20
-      push!(batch, convert(KnetArray{Float32}, generateStep([vocab(elm[i]) for elm in minix])))
-    end
-      push!(data,(batch, convert(KnetArray{Float32},y[((j-1)*sz+1):sz*j,:])))
-  end
-  return data
-end
-
-function lstm(cell,x,hidden,W)
-  input = [x hidden]
-  fgate = sigm(input * W[1] .+ W[2])
-  igate = sigm(input * W[3] .+ W[4])
-  candidate = tanh(input * W[5] .+ W[6])
-  cell = fgate .* cell + igate .* candidate
-  ogate = sigm(input * W[7] .+ W[8])
-  hidden = ogate .* tanh(cell)
-  return (cell,hidden)
 end
 
 function predict(w,x,cell,hidden)
   for input in x
-    cell, hidden = lstm(cell,input,hidden,w)
+    cell, hidden = lstm(cell,input,hidden,w[1:2])
   end
-
-  y = hidden * w[9] .+ w[10]
+  y = hidden * w[3] .+ w[4]
   return y
 end
 
 function pred(w,x,cell,hidden)
   for input in x
-    cell, hidden = lstm(cell,input,hidden,w)
+    cell, hidden = lstm(cell,input,hidden,w[1:2])
   end
-  y = hidden * w[9] .+ w[10]
+  y = hidden * w[3] .+ w[4]
   y = y .- maximum(y,2)
-  expsum = sum(exp(y),2)
-  pred = exp(y)./expsum
+  y = exp(y)
+  expsum = sum(y,2)
+  pred = y./expsum
   return pred
 end
 
 function loss(w,x,ygold,cell,hidden)
   ypred = predict(w,x,cell,hidden)
-  ypred = ypred .- maximum(ypred,2)
-  expy = exp(ypred)
   ynorm = logp(ypred,2)
   lost = -sum(ygold .* ynorm) / size(ygold, 1)
-  println("sum")
   return lost
 end
 
@@ -167,6 +166,7 @@ lossgradient =  grad(loss)
 function train(w,dtrn,params,cell,hidden)
     for (x,y) in dtrn
         w_grad = lossgradient(w, x, y, cell, hidden)
+        @show gradcheck(loss,w,x,y,cell,hidden;verbose=true,atol=0.01)
         for i=1:length(w)
           update!(w[i],w_grad[i],params[i])
         end
@@ -179,10 +179,13 @@ function accuracy(w,dtst,cell,hidden)
     ninstance = 0
     nloss = 0
     for (x,y) in dtst
-        pred_y = pred(w,x,cell,hidden)
-        pred_y = pred_y .== maximum(pred_y,1)
+        pred_y = pred(w,x,copy(cell),copy(hidden))
+        # println(convert(Array{Float32},pred_y))
+        pred_y = pred_y .== maximum(pred_y,2)
+        # println(size(pred_y))
+        # println(size(y))
         ncorrect += sum(pred_y .* y)
-        ninstance += size(pred_y,2)
+        ninstance += size(pred_y,1)
     end
     nloss = ninstance - ncorrect
     return (ncorrect, nloss,ninstance)
@@ -191,7 +194,7 @@ end
 function avgloss(w,data,cell,hidden)
     sum = cnt = 0
     for (x,y) in data
-        sum += loss(w,x,y,cell,hidden)
+        sum += loss(w,x,y,copy(cell),copy(hidden))
         cnt += 1
     end
     return sum, cnt
@@ -200,18 +203,12 @@ end
 function main()
   opts = parse_commandline()
   println("opts=",[(k,v) for (k,v) in opts]...)
-  prepData()
-  chunk_size = 12800
-  if opts[:weight] != ""
-    println("reading initial weight from $(opts[:weight]) file.")
-    w = weights(opts[:state];w=load(opts[:weight])["w"])
-  else
-    w = weights(opts[:state])
-  end
-  cell,hidden = initstate(opts[:state],opts[:batchsize])
-  params = initparams(w;learningRate=opts[:lr])
-  dtrain,dtest,dvalid = read_data()
-  itrain, ival, itest = getIter(length(dtrain),length(dtest),length(dvalid),chunk_size)
+  prepData(opts[:ltrain],opts[:ltest],opts[:lval])
+  dtrain, dtest, dval = read_data()
+  cell, hidden = initstate(opts[:state],opts[:batchsize])
+  w = weights(opts[:state],4,2)
+  params = initparams(w)
+  itrain, ival, itest = getIter(opts[:ltrain],opts[:ltest],opts[:lval],opts[:chunksize])
   patience = 0
   bests = Inf
   bestw =Any[]
@@ -224,7 +221,7 @@ function main()
     print("epoch $epoch... \n")
     average_loss = 0
     @time for i=1:itrain
-      data = getChunk(dtrain, chunk_size, i)
+      data = getChunk(dtrain, opts[:chunksize], i)
       xtrn, ytrn = preprocess(data)
       dtrn = minibatch(xtrn,ytrn,opts[:batchsize])
       train(w,dtrn,params,copy(cell),copy(hidden))
@@ -232,7 +229,7 @@ function main()
     nloss = 0;ninstance = 0
     tloss = 0;tinstance = 0
     for i=1:ival
-      data = getChunk(dvalid, chunk_size, i)
+      data = getChunk(dval, opts[:chunksize], i)
       xva, yva = preprocess(data)
       dva = minibatch(xva,yva,opts[:batchsize])
       nloss, ninstance= avgloss(w,dva,copy(cell),copy(hidden))
@@ -252,7 +249,7 @@ function main()
   end
   corr=0;wrong=0;instance = 0
   for i=1:itest
-    data = getChunk(dtest, chunk_size, i)
+    data = getChunk(dtest, opts[:chunksize], i)
     xtst, ytst = preprocess(data)
     dtst = minibatch(xtst,ytst,opts[:batchsize])
     ncorr, nwrong, ninstance = accuracy(bestw,dtst,copy(cell),copy(hidden))
@@ -266,3 +263,4 @@ function main()
 end
 
 w = main()
+

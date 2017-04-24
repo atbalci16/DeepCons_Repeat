@@ -36,9 +36,9 @@ function prepData()
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",10000) #1290000
-  writeData("data_te.seq","data_test.seq",1500) #165000
-  writeData("data_va.seq","data_valid.seq",1500) #165000
+  writeData("data_tr.seq","data_train.seq",1200000) #1290000
+  writeData("data_te.seq","data_test.seq",100000) #165000
+  writeData("data_va.seq","data_valid.seq",100000) #165000
 end
 
 function read_data()
@@ -115,14 +115,14 @@ function weights(;w=[],winit=0.1)
     if length(w) == 8
       return map(x->convert(KnetArray{Float32},x),w)
     else
-      return Any[randn(4,10,1,1000)*winit, 
-                 zeros(1,1,1000,1),
-                 randn(4,20,1,500)*winit, 
-                 zeros(1,1,500,1),
-                 randn(1500,1500),
-                 zeros(1500,1),
-                 randn(2,1500)*winit,
-                 zeros(2,1)]
+      return Any[convert(KnetArray{Float32},0.01*randn(4,10,1,1000)*winit), 
+                 convert(KnetArray{Float32},zeros(1,1,1000,1)),
+                 convert(KnetArray{Float32},0.01*randn(4,20,1,500)*winit), 
+                 convert(KnetArray{Float32},zeros(1,1,500,1)),
+                 convert(KnetArray{Float32},0.01*randn(1500,1500)),
+                 convert(KnetArray{Float32},zeros(1500,1)),
+                 convert(KnetArray{Float32},0.01*randn(2,1500)*winit),
+                 convert(KnetArray{Float32},zeros(2,1))]
     end    
 end
 

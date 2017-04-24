@@ -2,7 +2,7 @@
 #     Pkg.installed(p) == nothing && Pkg.add(p)
 # end
 
-using Knet, JLD, ArgParse
+using Knet, JLD, ArgParse, AutoGrad
 
 function parse_commandline()
     s = ArgParseSettings()
@@ -36,9 +36,9 @@ function prepData()
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",1024) #1290000
-  writeData("data_te.seq","data_test.seq",128) #165000
-  writeData("data_va.seq","data_valid.seq",128) #165000
+  writeData("data_tr.seq","data_train.seq",5000) #1290000
+  writeData("data_te.seq","data_test.seq",1000) #165000
+  writeData("data_va.seq","data_valid.seq",1000) #165000
 end
 
 function read_data()
@@ -90,6 +90,7 @@ end
 function preprocess(data)
   xdata = [elm[1] for elm in data]
   ydata = [parse(elm[2]) for elm in data]
+  ydata = convert(Array{Float32},reshape(ydata,1,length(ydata)))
   preprocessed = zeros(UInt8,4,200,1,length(xdata))
   map( x -> seqToVector!(preprocessed, x[2], x[1]),enumerate(xdata))
   return preprocessed, ydata
@@ -99,22 +100,22 @@ function minibatch(x,y,sz)
     data = Any[]
     for i=1:sz:size(x,4)
       if i+sz-1 > size(x,4)
-        push!(data,(convert(KnetArray{Float32},x[:,:,:,i:end]),convert(KnetArray{Float32},y[i:end])))
+        push!(data,(convert(KnetArray{Float32},x[:,:,:,i:end]),convert(KnetArray{Float32},y[:,i:end])))
       else
-        push!(data,(convert(KnetArray{Float32},x[:,:,:,i:i+sz-1]),convert(KnetArray{Float32},y[i:i+sz-1])))
+        push!(data,(convert(KnetArray{Float32},x[:,:,:,i:i+sz-1]),convert(KnetArray{Float32},y[:,i:i+sz-1])))
       end
     end
     return data
 end
 
 function weights(;w=[],winit=0.1)
-    model = Any[convert(KnetArray{Float32}, randn(4,10,1,1000)*winit), 
+    model = Any[convert(KnetArray{Float32}, 0.01*randn(4,10,1,1000)), 
                 convert(KnetArray{Float32}, zeros(1,1,1000,1)),
-                convert(KnetArray{Float32}, randn(4,20,1,500)*winit), 
+                convert(KnetArray{Float32}, 0.01*randn(4,20,1,500)*winit), 
                 convert(KnetArray{Float32}, zeros(1,1,500,1)),
-                convert(KnetArray{Float32}, randn(1500,1500)),
+                convert(KnetArray{Float32}, 0.01*randn(1500,1500)),
                 convert(KnetArray{Float32}, zeros(1500,1)),
-                convert(KnetArray{Float32}, randn(1,1500)*winit),
+                convert(KnetArray{Float32}, 0.01*randn(1,1500)*winit),
                 convert(KnetArray{Float32}, zeros(1,1))]
     return model
 end
@@ -124,12 +125,12 @@ function initparams(weights;learningRate=0.005)
 end
 
 function predict(w,x)
-    pool_1 = pool(dropout(relu(conv4(w[1],x) .+ w[2]), 0.25);stride=191,window=191)
-    pool_2 = pool(dropout(relu(conv4(w[3],x) .+ w[4]), 0.25);stride=181,window=181)
+    pool_1 = pool(dropout(relu(conv4(w[1],x) .+ w[2]),0.25);stride=191,window=191)
+    pool_2 = pool(dropout(relu(conv4(w[3],x) .+ w[4]),0.25);stride=181,window=181)
     pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
     pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
     pool_out = [pool_1 ; pool_2]
-    y = dropout(relu(w[5]*pool_out .+ w[6]), 0.5)
+    y = dropout(relu(w[5]*pool_out .+ w[6]),0.5)
     y = sigm(w[7]*y .+ w[8])
     return y 
 end
@@ -147,7 +148,7 @@ end
 
 function loss(w,x,ygold)
     y = predict(w,x)
-    lost = -sum(ygold .* y + (1-ygold) .* (1-y)) / size(x, 4)
+    lost = -sum(ygold .* log(y) + (1-ygold) .* log(1-y)) / length(ygold)
     return lost
 end
 
@@ -156,6 +157,7 @@ lossgradient =  grad(loss)
 function train(w,dtrn,params)
     for (x,y) in dtrn
         w_grad = lossgradient(w, x, y)
+        #@show gradcheck(loss,w,x,y;verbose=true,atol=0.01)
         for i=1:length(w)
           update!(w[i],w_grad[i],params[i])
         end
@@ -178,10 +180,9 @@ function accuracy(w,dtst)
     nloss = 0
     for (x,y) in dtst
         pred_y = pred(w,x)
-        println(convert(Array{Float32},pred_y))
         pred_y = round(pred_y)
+        ninstance += size(x,4)
         ncorrect += sum(pred_y .* y)
-        ninstance += length(pred_y)
     end
     nloss = ninstance - ncorrect
     return (ncorrect, nloss,ninstance)
