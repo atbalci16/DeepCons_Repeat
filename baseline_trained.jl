@@ -1,8 +1,5 @@
-# for p in ("Knet")
-#     Pkg.installed(p) == nothing && Pkg.add(p)
-# end
+using Knet, JLD, ArgParse
 
-using Knet, JLD, ArgParse, AutoGrad
 
 function parse_commandline()
     s = ArgParseSettings()
@@ -11,16 +8,22 @@ function parse_commandline()
         ("--batchsize"; arg_type=Int; default=128; help="Number of sequences to train on in parallel.")
         ("--lr"; arg_type=Float64; default=0.005; help="Initial learning rate.")
         ("--weight"; arg_type=String; default=""; help="Initial weights instead of randomly initialized ones.")
+        ("--chunksize"; arg_type=Int; default=12800; help="Chunk size.")
+        ("--ltrain"; arg_type=Int; default=1024; help="Training size.")
+        ("--ltest"; arg_type=Int; default=128; help="Test size.")
+        ("--lval"; arg_type=Int; default=128; help="Validation size.")
+        ("--lsequence"; arg_type=Int; default=200; help="Sequence length.")
     end
     return parse_args(s;as_symbols = true)        
 end
 
-function writeData(itxt,otxt,n)
+
+function writeData(itxt,otxt,n,sz)
   ofile = open(otxt, "w")
   index = 1
   open(itxt, "r") do file
     for line in readlines(file)
-      if length(line)-2 < 200
+      if length(line)-3 <= sz
         write(ofile,line)
         index += 1
       end
@@ -32,13 +35,13 @@ function writeData(itxt,otxt,n)
   close(ofile)
 end
 
-function prepData()
+function prepData(trsz,tssz,vasz,lsequence)
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",5000) #1290000
-  writeData("data_te.seq","data_test.seq",1000) #165000
-  writeData("data_va.seq","data_valid.seq",1000) #165000
+  writeData("data_tr.seq","data_train.seq",trsz,lsequence) #1290000
+  writeData("data_te.seq","data_test.seq",tssz,lsequence) #165000
+  writeData("data_va.seq","data_valid.seq",vasz,lsequence) #165000
 end
 
 function read_data()
@@ -66,84 +69,65 @@ function getIter(ltr,lts,lva,sz)
   return convert(Int32,ceil(ltr/sz)), convert(Int32,ceil(lva/sz)), convert(Int32,ceil(lts/sz))
 end
 
-function seqMap(na)
+function seqToVector!(matrix,seq,index)
   seqMap = Dict{Char,UInt8}('A' => 1, 'G' => 2, 'C' => 3, 'T' => 4)
-  return seqMap[na]
-end
-
-function seqToVector(seq)
-  m = convert(Array{Float32}, zeros(4,200,1,1))
-  index = map(x-> sub2ind(size(m),x[1],x[2],1,1) , 
-              map(x -> (seqMap(x[2]),x[1]), 
-                filter(x -> x[2] != 'N', enumerate(seq))))
-  m[index] = 1
-  return m
-end
-
-function seqToVector!(matrix, seq, index)
-  index_m = map(x-> sub2ind(size(matrix),x[1],x[2],1,index) , 
-              map(x -> (seqMap(x[2]),x[1]), 
-                filter(x -> x[2] != 'N', enumerate(seq))))
-  matrix[index_m] = 1
-end
-
-function preprocess(data)
-  xdata = [elm[1] for elm in data]
-  ydata = [parse(elm[2]) for elm in data]
-  ydata = convert(Array{Float32},reshape(ydata,1,length(ydata)))
-  preprocessed = zeros(UInt8,4,200,1,length(xdata))
-  map( x -> seqToVector!(preprocessed, x[2], x[1]),enumerate(xdata))
-  return preprocessed, ydata
-end
-
-function minibatch(x,y,sz)
-    data = Any[]
-    for i=1:sz:size(x,4)
-      if i+sz-1 > size(x,4)
-        push!(data,(convert(KnetArray{Float32},x[:,:,:,i:end]),convert(KnetArray{Float32},y[:,i:end])))
-      else
-        push!(data,(convert(KnetArray{Float32},x[:,:,:,i:i+sz-1]),convert(KnetArray{Float32},y[:,i:i+sz-1])))
-      end
+  for i=1:length(seq)
+    if seq[i] != 'N'
+      matrix[(i-1)*4+seqMap[seq[i]],index] = 1
     end
-    return data
+  end
 end
 
-function weights(;w=[],winit=0.1)
-    model = Any[convert(KnetArray{Float32}, 0.01*randn(4,10,1,1000)), 
-                convert(KnetArray{Float32}, zeros(1,1,1000,1)),
-                convert(KnetArray{Float32}, 0.01*randn(4,20,1,500)*winit), 
-                convert(KnetArray{Float32}, zeros(1,1,500,1)),
-                convert(KnetArray{Float32}, 0.01*randn(1500,1500)),
-                convert(KnetArray{Float32}, zeros(1500,1)),
-                convert(KnetArray{Float32}, 0.01*randn(1,1500)*winit),
-                convert(KnetArray{Float32}, zeros(1,1))]
-    return model
+function oneHot(y)
+  matrix = zeros(UInt8,2,length(y))
+  for i=1:length(y)
+    matrix[y[i]+1, i] = 1
+  end
+  return matrix
+end
+
+function preprocess(data,sz)
+  x = zeros(UInt8,sz*4,length(data))
+  ylabel =[parse(elm[2]) for elm in data]
+  y = oneHot(ylabel)
+  for (index,elm) in enumerate(data)
+    seqToVector!(x,elm[1],index)
+  end
+  return x, y
 end
 
 function initparams(weights;learningRate=0.005)
   return map(x -> Adagrad(;lr=learningRate), weights)
 end
 
-function predict(w,x)
-    pool_1 = pool(dropout(relu(conv4(w[1],x) .+ w[2]),0.25);stride=191,window=191)
-    pool_2 = pool(dropout(relu(conv4(w[3],x) .+ w[4]),0.25);stride=181,window=181)
-    pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
-    pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
-    pool_out = [pool_1 ; pool_2]
-    y = dropout(relu(w[5]*pool_out .+ w[6]),0.5)
-    y = sigm(w[7]*y .+ w[8])
-    return y 
+function minibatch(x,y,sz)
+    data = Any[]
+    for i=1:sz:size(x,2)
+      if i+sz-1 > size(x,2)
+        push!(data,(x[:,i:end],y[:,i:end]))
+      else
+        push!(data,(x[:,i:i+sz-1],y[:,i:i+sz-1]))
+      end
+    end
+    return data
 end
 
-function pred(w,x)
-    pool_1 = pool(relu(conv4(w[1],x) .+ w[2]);stride=191,window=191)
-    pool_2 = pool(relu(conv4(w[3],x) .+ w[4]);stride=181,window=181)
-    pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
-    pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
-    pool_out = [pool_1 ; pool_2]
-    y = relu(w[5]*pool_out .+ w[6])
-    y = sigm(w[7]*y .+ w[8])
-    return y
+function weights(h;winit=0.1)
+  w = Any[]
+    x = h[1]
+    for y in h[2:end]
+        push!(w, convert(Array{Float32}, randn(y, x)*winit))
+        push!(w, zeros(Float32, y,1))
+        x = y 
+    end
+    return w
+end
+
+function predict(w,x)
+    for i=1:2:length(w)-2
+        x = relu(w[i]*x .+ w[i+1])
+    end
+    return sigm(w[end-1]*x .+ w[end])
 end
 
 function loss(w,x,ygold)
@@ -152,12 +136,30 @@ function loss(w,x,ygold)
     return lost
 end
 
+function avgloss(w,data)
+    return sum([loss(w,x,y) for (x,y) in data]), length(data)
+end
+
+function accuracy(w, data)
+    ncorrect = 0
+    ninstance = 0
+    nloss = 0
+    for (x,y) in data
+        pred_y = predict(w,x)
+        pred_y = [1-pred_y; pred_y]
+        pred_y = pred_y .== maximum(pred_y,1)
+        ncorrect += sum(pred_y .* y)
+        ninstance += size(pred_y,2)
+    end
+    nloss = ninstance - ncorrect
+    return (ncorrect, nloss, ninstance)
+end
+
 lossgradient =  grad(loss)
 
 function train(w,dtrn,params)
     for (x,y) in dtrn
         w_grad = lossgradient(w, x, y)
-        #@show gradcheck(loss,w,x,y;verbose=true,atol=0.01)
         for i=1:length(w)
           update!(w[i],w_grad[i],params[i])
         end
@@ -165,42 +167,13 @@ function train(w,dtrn,params)
     return w
 end
 
-function avgloss(w,data)
-    sum = cnt = 0
-    for (x,y) in data
-        sum += loss(w,x,y)
-        cnt += 1
-    end
-    return sum, cnt
-end
-
-function accuracy(w,dtst)
-    ncorrect = 0
-    ninstance = 0
-    nloss = 0
-    for (x,y) in dtst
-        pred_y = pred(w,x)
-        pred_y = round(pred_y)
-        ninstance += size(x,4)
-        ncorrect += sum(pred_y .* y)
-    end
-    nloss = ninstance - ncorrect
-    return (ncorrect, nloss,ninstance)
-end
-
 function main(args=ARGS)
   opts = parse_commandline()
   println("opts=",[(k,v) for (k,v) in opts]...)
-  prepData(opts[:ltrain],opts[:ltest],opts[:lval])
-  chunk_size = 12800
-  if opts[:weight] != ""
-    println("reading initial weight from $(opts[:weight]) file.")
-    w = weights(;w=load(opts[:weight])["w"])
-  else
-    w = weights()
-  end
+  prepData(opts[:ltrain],opts[:ltest],opts[:lval],opts[:lsequence])
+  w = weights([opts[:lsequence]*4 1])
   params = initparams(w;learningRate=opts[:lr])
-  
+  dtrain,dtest,dvalid = read_data()
   itrain, ival, itest = getIter(opts[:ltrain],opts[:ltest],opts[:lval],opts[:chunksize])
   patience = 0
   bests = Inf
@@ -215,7 +188,7 @@ function main(args=ARGS)
     average_loss = 0
     @time for i=1:itrain
       data = getChunk(dtrain, opts[:chunksize], i)
-      xtrn, ytrn = preprocess(data)
+      xtrn, ytrn = preprocess(data,opts[:lsequence])
       dtrn = minibatch(xtrn,ytrn,opts[:batchsize])
       train(w,dtrn,params)
     end
@@ -223,7 +196,7 @@ function main(args=ARGS)
     tloss = 0;tinstance = 0
     for i=1:ival
       data = getChunk(dvalid, opts[:chunksize], i)
-      xva, yva = preprocess(data)
+      xva, yva = preprocess(data,opts[:lsequence])
       dva = minibatch(xva,yva,opts[:batchsize])
       nloss, ninstance= avgloss(w,dva)
       tloss += nloss; tinstance += ninstance
@@ -243,7 +216,7 @@ function main(args=ARGS)
   corr=0;wrong=0;instance = 0
   for i=1:itest
     data = getChunk(dtest, opts[:chunksize], i)
-    xtst, ytst = preprocess(data)
+    xtst, ytst = preprocess(data,opts[:lsequence])
     dtst = minibatch(xtst,ytst,opts[:batchsize])
     ncorr, nwrong, ninstance = accuracy(bestw,dtst)
     corr += ncorr; wrong += nwrong; instance += ninstance

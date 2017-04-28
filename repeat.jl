@@ -11,16 +11,21 @@ function parse_commandline()
         ("--batchsize"; arg_type=Int; default=128; help="Number of sequences to train on in parallel.")
         ("--lr"; arg_type=Float64; default=0.005; help="Initial learning rate.")
         ("--weight"; arg_type=String; default=""; help="Initial weights instead of randomly initialized ones.")
+        ("--chunksize"; arg_type=Int; default=12800; help="Chunk size.")
+        ("--ltrain"; arg_type=Int; default=1024; help="Training size.")
+        ("--ltest"; arg_type=Int; default=128; help="Test size.")
+        ("--lval"; arg_type=Int; default=128; help="Validation size.")
+        ("--lsequence"; arg_type=Int; default=200; help="Sequence length.")
     end
     return parse_args(s;as_symbols = true)        
 end
 
-function writeData(itxt,otxt,n)
+function writeData(itxt,otxt,n,sz)
   ofile = open(otxt, "w")
   index = 1
   open(itxt, "r") do file
     for line in readlines(file)
-      if length(line)-2 < 200
+      if length(line)-3 <= sz
         write(ofile,line)
         index += 1
       end
@@ -32,13 +37,13 @@ function writeData(itxt,otxt,n)
   close(ofile)
 end
 
-function prepData()
+function prepData(trsz,tssz,vasz,lsequence)
   isfile("data_te.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_te.seq", "data_te.seq")
   isfile("data_tr.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_tr.seq", "data_tr.seq")
   isfile("data_va.seq") || download("https://cbcl.ics.uci.edu/public_data/DeepCons/data_va.seq", "data_va.seq")
-  writeData("data_tr.seq","data_train.seq",1200000) #1290000
-  writeData("data_te.seq","data_test.seq",100000) #165000
-  writeData("data_va.seq","data_valid.seq",100000) #165000
+  writeData("data_tr.seq","data_train.seq",trsz,lsequence) #1290000
+  writeData("data_te.seq","data_test.seq",tssz,lsequence) #165000
+  writeData("data_va.seq","data_valid.seq",vasz,lsequence) #165000
 end
 
 function read_data()
@@ -71,8 +76,8 @@ function seqMap(na)
   return seqMap[na]
 end
 
-function seqToVector(seq)
-  m = convert(Array{Float32}, zeros(4,200,1,1))
+function seqToVector(seq,sz)
+  m = convert(Array{Float32}, zeros(4,sz,1,1))
   index = map(x-> sub2ind(size(m),x[1],x[2],1,1) , 
               map(x -> (seqMap(x[2]),x[1]), 
                 filter(x -> x[2] != 'N', enumerate(seq))))
@@ -87,10 +92,10 @@ function seqToVector!(matrix, seq, index)
   matrix[index_m] = 1
 end
 
-function preprocess(data)
+function preprocess(data,lsequence)
   xdata = [elm[1] for elm in data]
   ydata = [elm[2] for elm in data]
-  preprocessed = zeros(UInt8,4,200,1,length(xdata))
+  preprocessed = zeros(UInt8,4,lsequence,1,length(xdata))
   y_out = zeros(UInt8,2, length(ydata))
   map( x -> seqToVector!(preprocessed, x[2], x[1]),enumerate(xdata))
   y = [parse(elm)+1 for elm in ydata]
@@ -131,8 +136,9 @@ function initparams(weights;learningRate=0.005)
 end
 
 function predict(w,x)
-    pool_1 = pool(dropout(relu(conv4(w[1],x) .+ w[2]), 0.25);stride=191,window=191)
-    pool_2 = pool(dropout(relu(conv4(w[3],x) .+ w[4]), 0.25);stride=181,window=181)
+    stride_p = size(x,2)
+    pool_1 = pool(dropout(relu(conv4(w[1],x) .+ w[2]), 0.25);stride=stride_p,window=stride_p)
+    pool_2 = pool(dropout(relu(conv4(w[3],x) .+ w[4]), 0.25);stride=stride_p,window=stride_p)
     pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
     pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
     pool_out = [pool_1 ; pool_2]
@@ -142,8 +148,9 @@ function predict(w,x)
 end
 
 function pred(w,x)
-    pool_1 = pool(relu(conv4(w[1],x) .+ w[2]);stride=191,window=191)
-    pool_2 = pool(relu(conv4(w[3],x) .+ w[4]);stride=181,window=181)
+    stride_p = size(x,2)
+    pool_1 = pool(relu(conv4(w[1],x) .+ w[2]);stride=stride_p,window=stride_p)
+    pool_2 = pool(relu(conv4(w[3],x) .+ w[4]);stride=stride_p,window=stride_p)
     pool_1 = reshape(pool_1, (size(pool_1,1)*size(pool_1,2)*size(pool_1,3),size(pool_1,4)))
     pool_2 = reshape(pool_2, (size(pool_2,1)*size(pool_2,2)*size(pool_2,3),size(pool_2,4)))
     pool_out = [pool_1 ; pool_2]
@@ -202,7 +209,7 @@ end
 function main(args=ARGS)
   opts = parse_commandline()
   println("opts=",[(k,v) for (k,v) in opts]...)
-  prepData()
+  prepData(opts[:ltrain],opts[:ltest],opts[:lval],opts[:lsequence])
   chunk_size = 12800
   if opts[:weight] != ""
     println("reading initial weight from $(opts[:weight]) file.")
@@ -212,7 +219,7 @@ function main(args=ARGS)
   end
   params = initparams(w;learningRate=opts[:lr])
   dtrain,dtest,dvalid = read_data()
-  itrain, ival, itest = getIter(length(dtrain),length(dtest),length(dvalid),chunk_size)
+  itrain, ival, itest = getIter(opts[:ltrain],opts[:ltest],opts[:lval],opts[:chunksize])
   patience = 0
   bests = Inf
   bestw = Any[]
@@ -225,16 +232,16 @@ function main(args=ARGS)
     print("epoch $epoch... \n")
     average_loss = 0
     @time for i=1:itrain
-      data = getChunk(dtrain, chunk_size, i)
-      xtrn, ytrn = preprocess(data)
+      data = getChunk(dtrain, opts[:chunksize], i)
+      xtrn, ytrn = preprocess(data,opts[:lsequence])
       dtrn = minibatch(xtrn,ytrn,opts[:batchsize])
       train(w,dtrn,params)
     end
     nloss = 0;ninstance = 0
     tloss = 0;tinstance = 0
     for i=1:ival
-      data = getChunk(dvalid, chunk_size, i)
-      xva, yva = preprocess(data)
+      data = getChunk(dvalid, opts[:chunksize], i)
+      xva, yva = preprocess(data,opts[:lsequence])
       dva = minibatch(xva,yva,opts[:batchsize])
       nloss, ninstance= avgloss(w,dva)
       tloss += nloss; tinstance += ninstance
@@ -253,8 +260,8 @@ function main(args=ARGS)
   end
   corr=0;wrong=0;instance = 0
   for i=1:itest
-    data = getChunk(dtest, chunk_size, i)
-    xtst, ytst = preprocess(data)
+    data = getChunk(dtest, opts[:chunksize], i)
+    xtst, ytst = preprocess(data,opts[:lsequence])
     dtst = minibatch(xtst,ytst,opts[:batchsize])
     ncorr, nwrong, ninstance = accuracy(bestw,dtst)
     corr += ncorr; wrong += nwrong; instance += ninstance

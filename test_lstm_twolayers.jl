@@ -120,6 +120,8 @@ end
 function weights(lstate,vocabsz,outsz;atype=KnetArray{Float32})
   weights = Any[convert(atype,xavier((vocabsz+lstate), 4*lstate)),
                 convert(atype, zeros(1,4*lstate)),
+                convert(atype,xavier((lstate+lstate), 4*lstate)),
+                convert(atype, zeros(1,4*lstate)),
                 convert(atype,xavier(lstate,outsz)),
                 convert(atype, zeros(1,outsz))]
   return weights
@@ -136,18 +138,36 @@ function initstate(lstate,batchsz)
 end
 
 function predict(w,x,cell,hidden)
-  for input in x
-    cell, hidden = lstm(cell,input,hidden,w[1:2])
+  layer = Array{Any}(length(x))
+  c = copy(cell)
+  h = copy(hidden)
+  for  i=1:length(x)
+    c, h = lstm(c,x[i],h,w[1:2])
+    layer[i] = copy(h)
   end
-  y = hidden * w[3] .+ w[4]
+  c = copy(cell)
+  h = copy(hidden)
+  for  i=1:length(layer)
+    c, h = lstm(c,layer[i],h,w[3:4])
+  end
+  y = h * w[5] .+ w[6]
   return y
 end
 
 function pred(w,x,cell,hidden)
-  for input in x
-    cell, hidden = lstm(cell,input,hidden,w[1:2])
+  layer = Array{Any}(length(x))
+  c = copy(cell)
+  h = copy(hidden)
+  for  i=1:length(x)
+    c, h = lstm(c,x[i],h,w[1:2])
+    layer[i] = copy(h)
   end
-  y = hidden * w[3] .+ w[4]
+  c = copy(cell)
+  h = copy(hidden)
+  for  i=1:length(layer)
+    c, h = lstm(c,layer[i],h,w[3:4])
+  end
+  y = h * w[5] .+ w[6]
   y = y .- maximum(y,2)
   y = exp(y)
   expsum = sum(y,2)
